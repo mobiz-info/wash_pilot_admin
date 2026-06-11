@@ -109,6 +109,10 @@ urlpatterns = [
     path('api/reports/bookings/', api_views.api_report_bookings, name='api_report_bookings'),
     path('api/reports/cancellations/', api_views.api_report_cancellations, name='api_report_cancellations'),
     path('api/reports/service-type/', api_views.api_report_service_type, name='api_report_service_type'),
+    path('api/reports/service-type/detail/', api_views.api_report_service_type_detail, name='api_report_service_type_detail'),
+    path('api/reports/service-type/vehicle-breakdown/', api_views.api_report_service_type_vehicle_breakdown, name='api_report_service_type_vehicle_breakdown'),
+    path('api/reports/profit-loss/', api_views.api_report_profit_loss, name='api_report_profit_loss'),
+
 
     # Complaint Management
     path('api/complaint-types/', api_views.api_list_complaint_types, name='api_list_complaint_types'),
@@ -142,8 +146,14 @@ urlpatterns = [
     path('purchase-requests/approve/<uuid:id>/', views.purchase_request_approve, name='purchase_request_approve'),
     path('purchase-requests/reject/<uuid:id>/', views.purchase_request_reject, name='purchase_request_reject'),
     
-    # API endpoints for Purchase Requests
     path('api/stock/list/', api_views.api_get_stock_list, name='api_get_stock_list'),
     path('api/purchase-requests/list/', api_views.api_get_purchase_requests, name='api_get_purchase_requests'),
     path('api/purchase-requests/create/', api_views.api_create_purchase_request, name='api_create_purchase_request'),
+    path('api/expenses/heads/create/', api_views.api_create_expense_head, name='api_create_expense_head'),
+    path('api/stock/create/', api_views.api_create_stock, name='api_create_stock'),
+    path('api/extras/list/', api_views.api_get_extras_list, name='api_get_extras_list'),
+    path('api/extras/create/', api_views.api_create_extra, name='api_create_extra'),
+    path('api/reports/expense-head-wise/', api_views.api_report_expense_head_wise, name='api_report_expense_head_wise'),
+    path('api/reports/expense-head-wise/detail/', api_views.api_report_expense_head_detail, name='api_report_expense_head_detail'),
+    path('api/reports/leave/', api_views.api_report_leave, name='api_report_leave'),
 ]

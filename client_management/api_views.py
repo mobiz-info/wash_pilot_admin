@@ -1755,6 +1755,168 @@ def api_report_service_type(request):
 
 
 @csrf_exempt
+def api_report_service_type_detail(request):
+    """Detailed view of all invoice items under a specific service name in date range."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    from finance_management.models import InvoiceItem
+
+    service_name = request.GET.get('service_name')
+    if not service_name:
+        return JsonResponse({'success': False, 'message': 'service_name is required'}, status=400)
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    invoice_scope = {f'invoice__{k}': v for k, v in scope.items()}
+
+    filters = {
+        'service_name': service_name,
+        'invoice__is_deleted': False,
+        'invoice__date__gte': from_date,
+        'invoice__date__lte': to_date,
+    }
+
+    vehicle_type_id = request.GET.get('vehicle_type_id')
+    vehicle_type_model_id = request.GET.get('vehicle_type_model_id')
+
+    if vehicle_type_id:
+        if vehicle_type_id == 'null':
+            filters['invoice__vehicle__vehicle_type__isnull'] = True
+        else:
+            filters['invoice__vehicle__vehicle_type_id'] = vehicle_type_id
+
+    if vehicle_type_model_id:
+        if vehicle_type_model_id == 'null':
+            filters['invoice__vehicle__vehicle_type_model__isnull'] = True
+        else:
+            filters['invoice__vehicle__vehicle_type_model_id'] = vehicle_type_model_id
+
+    qs = InvoiceItem.objects.filter(
+        **filters,
+        **invoice_scope
+    ).select_related('invoice', 'invoice__customer', 'invoice__vehicle', 'invoice__vehicle__vehicle_type').order_by('-invoice__date', '-invoice__auto_id')
+
+    details = []
+    for idx, item in enumerate(qs, 1):
+        rate = float(item.rate or 0.0)
+        discount = float(item.discount or 0.0)
+        net_amount = rate - discount
+        
+        details.append({
+            'sl_no': idx,
+            'date': item.invoice.date.strftime('%Y-%m-%d'),
+            'invoice_number': item.invoice.invoice_number,
+            'customer_name': item.invoice.customer.name,
+            'customer_phone': item.invoice.customer.phone,
+            'vehicle_number': item.invoice.vehicle.vehicle_number if item.invoice.vehicle else '',
+            'vehicle_type': item.invoice.vehicle.vehicle_type.name if item.invoice.vehicle and item.invoice.vehicle.vehicle_type else '',
+            'amount': str(round(net_amount, 2)),
+        })
+
+    return JsonResponse({
+        'success': True,
+        'service_name': service_name,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'details': details
+    })
+
+
+@csrf_exempt
+def api_report_service_type_vehicle_breakdown(request):
+    """Breakdown of a specific service's revenue grouped by vehicle type/model."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    from finance_management.models import InvoiceItem
+    from django.db.models import Sum, Count, F
+
+    service_name = request.GET.get('service_name')
+    if not service_name:
+        return JsonResponse({'success': False, 'message': 'service_name is required'}, status=400)
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    invoice_scope = {f'invoice__{k}': v for k, v in scope.items()}
+
+    qs = InvoiceItem.objects.filter(
+        service_name=service_name,
+        invoice__is_deleted=False,
+        invoice__date__gte=from_date,
+        invoice__date__lte=to_date,
+        **invoice_scope
+    )
+
+    # Group by vehicle type and model
+    grouped = qs.values(
+        'invoice__vehicle__vehicle_type__name',
+        'invoice__vehicle__vehicle_type_model__name',
+        'invoice__vehicle__vehicle_type_id',
+        'invoice__vehicle__vehicle_type_model_id'
+    ).annotate(
+        count=Count('id'),
+        revenue=Sum(F('rate') - F('discount'))
+    ).order_by('-revenue')
+
+    rows = []
+    total_count = 0
+    total_revenue = 0.0
+
+    for item in grouped:
+        type_name = item['invoice__vehicle__vehicle_type__name'] or ''
+        model_name = item['invoice__vehicle__vehicle_type_model__name'] or ''
+        type_id = item['invoice__vehicle__vehicle_type_id']
+        model_id = item['invoice__vehicle__vehicle_type_model_id']
+        
+        display_name = ""
+        if type_name and model_name:
+            display_name = f"{type_name} - {model_name}"
+        elif type_name:
+            display_name = type_name
+        elif model_name:
+            display_name = model_name
+        else:
+            display_name = "Other"
+
+        count = item['count'] or 0
+        revenue = float(item['revenue'] or 0.0)
+        
+        total_count += count
+        total_revenue += revenue
+        
+        rows.append({
+            'vehicle_type_id': str(type_id) if type_id else 'null',
+            'vehicle_type_model_id': str(model_id) if model_id else 'null',
+            'vehicle_type_name': type_name,
+            'vehicle_type_model_name': model_name,
+            'display_name': display_name,
+            'count': count,
+            'revenue': str(round(revenue, 2)),
+        })
+
+    return JsonResponse({
+        'success': True,
+        'service_name': service_name,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'total_count': total_count,
+        'total_revenue': str(round(total_revenue, 2)),
+        'rows': rows,
+    })
+
+
+
+@csrf_exempt
+
 def api_list_complaint_types(request):
     if request.method != 'GET':
         return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
@@ -2365,3 +2527,419 @@ def api_create_purchase_request(request):
     except Exception as e:
         return JsonResponse({'success': False, 'message': str(e)}, status=500)
 
+
+@csrf_exempt
+def api_create_expense_head(request):
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': 'Only POST method is allowed'}, status=405)
+        
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+        
+    role = user.profile.role.name if user.profile.role else None
+    if role != 'COMPANY_ADMIN':
+        return JsonResponse({'success': False, 'message': 'Only Owner/Company Admin can create expense heads'}, status=403)
+        
+    try:
+        from master.models import ExpenseHead
+        from core.functions import get_auto_id
+        
+        data = json.loads(request.body)
+        name = data.get('name', '').strip()
+        if not name:
+            return JsonResponse({'success': False, 'message': 'Name is required'}, status=400)
+            
+        if ExpenseHead.objects.filter(name__iexact=name, is_deleted=False).exists():
+            return JsonResponse({'success': False, 'message': 'This expense head already exists'}, status=400)
+            
+        expense_head = ExpenseHead.objects.create(
+            name=name,
+            auto_id=get_auto_id(ExpenseHead),
+            creator=user
+        )
+        return JsonResponse({
+            'success': True,
+            'message': 'Expense head created successfully',
+            'expense_head': {'id': str(expense_head.id), 'name': expense_head.name}
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@csrf_exempt
+def api_create_stock(request):
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': 'Only POST method is allowed'}, status=405)
+        
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+        
+    role = user.profile.role.name if user.profile.role else None
+    if role != 'COMPANY_ADMIN':
+        return JsonResponse({'success': False, 'message': 'Only Owner/Company Admin can create stock items'}, status=403)
+        
+    company = user.profile.company
+    if not company:
+        return JsonResponse({'success': False, 'message': 'No company associated with user'}, status=400)
+        
+    try:
+        from .models import Stock
+        from core.functions import get_auto_id
+        
+        data = json.loads(request.body)
+        item_name = data.get('item_name', '').strip()
+        unit = data.get('unit', '').strip()
+        
+        if not item_name or not unit:
+            return JsonResponse({'success': False, 'message': 'item_name and unit are required'}, status=400)
+            
+        valid_units = [u[0] for u in Stock.UNIT_CHOICES]
+        if unit not in valid_units:
+            return JsonResponse({'success': False, 'message': f'Invalid unit. Valid choices are: {", ".join(valid_units)}'}, status=400)
+            
+        if Stock.objects.filter(company=company, item_name__iexact=item_name, is_deleted=False).exists():
+            return JsonResponse({'success': False, 'message': 'Stock item already exists'}, status=400)
+            
+        stock = Stock.objects.create(
+            company=company,
+            item_name=item_name,
+            unit=unit,
+            auto_id=get_auto_id(Stock),
+            creator=user
+        )
+        return JsonResponse({
+            'success': True,
+            'message': 'Stock item created successfully',
+            'stock': {
+                'id': str(stock.id),
+                'item_name': stock.item_name,
+                'unit': stock.unit,
+                'unit_display': stock.get_unit_display()
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@csrf_exempt
+def api_report_expense_head_wise(request):
+    """Expense head wise report: Summary of expenses grouped by head in date range."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    role = user.profile.role.name if user.profile.role else None
+    if role != 'COMPANY_ADMIN':
+        return JsonResponse({'success': False, 'message': 'Permission denied: Only Company Admin/Owner can access this report'}, status=403)
+
+    from master.models import ExpenseEntry, ExpenseHead
+    from django.db.models import Sum
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    qs = ExpenseEntry.objects.filter(
+        is_deleted=False,
+        expense_date__gte=from_date,
+        expense_date__lte=to_date,
+        **scope
+    ).select_related('expense__expense_head')
+
+    heads = ExpenseHead.objects.filter(is_deleted=False).order_by('name')
+    
+    rows = []
+    total_all = 0.0
+
+    for h in heads:
+        head_qs = qs.filter(expense__expense_head=h)
+        total_amount = head_qs.aggregate(s=Sum('amount'))['s'] or 0.0
+        total_amount = float(total_amount)
+        if total_amount > 0:
+            total_all += total_amount
+            rows.append({
+                'expense_head_id': str(h.id),
+                'expense_head_name': h.name,
+                'total_amount': str(round(total_amount, 2))
+            })
+
+    rows.sort(key=lambda x: float(x['total_amount']), reverse=True)
+
+    return JsonResponse({
+        'success': True,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'total_expense': str(round(total_all, 2)),
+        'rows': rows
+    })
+
+
+@csrf_exempt
+def api_report_profit_loss(request):
+    """Profit and Loss report: Income by service type and Expense by expense head, with net profit/loss."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    from finance_management.models import InvoiceItem
+    from master.models import ExpenseEntry, ExpenseHead
+    from django.db.models import Sum, F
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    invoice_scope = {f'invoice__{k}': v for k, v in scope.items()}
+
+    # --- 1. INCOME (grouped by service name) ---
+    income_qs = InvoiceItem.objects.filter(
+        invoice__is_deleted=False,
+        invoice__date__gte=from_date,
+        invoice__date__lte=to_date,
+        **invoice_scope
+    )
+    
+    income_grouped = income_qs.values('service_name').annotate(
+        revenue=Sum(F('rate') - F('discount'))
+    ).order_by('-revenue')
+
+    income_rows = []
+    total_income = 0.0
+    for item in income_grouped:
+        service_name = item['service_name']
+        revenue = float(item['revenue'] or 0.0)
+        total_income += revenue
+        income_rows.append({
+            'service_name': service_name,
+            'amount': str(round(revenue, 2)),
+        })
+
+    # --- 2. EXPENSE (grouped by expense head) ---
+    expense_qs = ExpenseEntry.objects.filter(
+        is_deleted=False,
+        expense_date__gte=from_date,
+        expense_date__lte=to_date,
+        **scope
+    ).select_related('expense__expense_head')
+
+    heads = ExpenseHead.objects.filter(is_deleted=False).order_by('name')
+    expense_rows = []
+    total_expense = 0.0
+
+    for h in heads:
+        head_qs = expense_qs.filter(expense__expense_head=h)
+        total_amount = head_qs.aggregate(s=Sum('amount'))['s'] or 0.0
+        total_amount = float(total_amount)
+        if total_amount > 0:
+            total_expense += total_amount
+            expense_rows.append({
+                'expense_head_name': h.name,
+                'amount': str(round(total_amount, 2))
+            })
+    
+    expense_rows.sort(key=lambda x: float(x['amount']), reverse=True)
+
+    # Calculate net profit or loss
+    net_profit = total_income - total_expense
+
+    return JsonResponse({
+        'success': True,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'total_income': str(round(total_income, 2)),
+        'total_expense': str(round(total_expense, 2)),
+        'net_profit': str(round(net_profit, 2)),
+        'income_rows': income_rows,
+        'expense_rows': expense_rows,
+    })
+
+
+@csrf_exempt
+def api_report_expense_head_detail(request):
+    """Detailed view of all expense entries under a specific head in date range."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    role = user.profile.role.name if user.profile.role else None
+    if role != 'COMPANY_ADMIN':
+        return JsonResponse({'success': False, 'message': 'Permission denied: Only Company Admin/Owner can access this report'}, status=403)
+
+    from master.models import ExpenseEntry, ExpenseHead
+    from django.shortcuts import get_object_or_404
+
+    expense_head_id = request.GET.get('expense_head_id')
+    if not expense_head_id:
+        return JsonResponse({'success': False, 'message': 'expense_head_id is required'}, status=400)
+
+    expense_head = get_object_or_404(ExpenseHead, id=expense_head_id, is_deleted=False)
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    entries = ExpenseEntry.objects.filter(
+        expense__expense_head=expense_head,
+        is_deleted=False,
+        expense_date__gte=from_date,
+        expense_date__lte=to_date,
+        **scope
+    ).select_related('expense').order_by('-expense_date', '-auto_id')
+
+    details = []
+    for idx, e in enumerate(entries, 1):
+        details.append({
+            'sl_no': idx,
+            'expense_name': e.expense.name,
+            'amount': str(e.amount),
+            'date': e.expense_date.strftime('%Y-%m-%d'),
+            'remarks': e.remarks or ''
+        })
+
+    return JsonResponse({
+        'success': True,
+        'expense_head_name': expense_head.name,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'details': details
+    })
+
+
+@csrf_exempt
+def api_report_leave(request):
+    """Leave report: List of all staff leaves in the date range."""
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET allowed'}, status=405)
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+
+    from client_management.models import StaffLeave
+    from django.db.models import Count
+
+    from_date, to_date = _parse_dates(request)
+    company, scope = _report_scope(user, request.GET.get('branch_id'))
+
+    staff_scope = {}
+    for key, val in scope.items():
+        new_key = key.replace('branch', 'staff__branch')
+        staff_scope[new_key] = val
+
+    leaves = StaffLeave.objects.filter(
+        is_deleted=False,
+        start_date__gte=from_date,
+        start_date__lte=to_date,
+        **staff_scope
+    ).select_related('staff__branch').order_by('-start_date')
+
+    rows = []
+    for idx, l in enumerate(leaves, 1):
+        rows.append({
+            'sl_no': idx,
+            'staff_name': l.staff.name,
+            'employee_id': l.staff.employee_id or '',
+            'branch_name': l.staff.branch.name if l.staff.branch else '',
+            'start_date': l.start_date.strftime('%Y-%m-%d'),
+            'end_date': l.end_date.strftime('%Y-%m-%d'),
+            'reason': l.reason or '',
+            'remarks': l.remarks or '',
+            'status': l.status
+        })
+
+    total_leaves = len(rows)
+    pending_leaves = sum(1 for r in rows if r['status'] == 'PENDING')
+    approved_leaves = sum(1 for r in rows if r['status'] == 'APPROVED')
+
+    return JsonResponse({
+        'success': True,
+        'from_date': str(from_date),
+        'to_date': str(to_date),
+        'total_leaves': total_leaves,
+        'pending_leaves': pending_leaves,
+        'approved_leaves': approved_leaves,
+        'rows': rows
+    })
+
+
+@csrf_exempt
+def api_get_extras_list(request):
+    if request.method != 'GET':
+        return JsonResponse({'success': False, 'message': 'Only GET method is allowed'}, status=405)
+        
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+        
+    try:
+        from .models import Extra
+        from django.db.models import Q
+        company = user.profile.company
+        if not company:
+            return JsonResponse({'success': False, 'message': 'No company associated with user'}, status=400)
+            
+        extras = Extra.objects.filter(
+            Q(company=company) | Q(company__isnull=True),
+            is_deleted=False
+        ).order_by('name')
+        
+        extras_list = [{
+            'id': str(e.id),
+            'name': e.name,
+        } for e in extras]
+        
+        return JsonResponse({'success': True, 'extras': extras_list})
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)
+
+
+@csrf_exempt
+def api_create_extra(request):
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'message': 'Only POST method is allowed'}, status=405)
+        
+    user = get_user_from_token(request)
+    if not user:
+        return JsonResponse({'success': False, 'message': 'Unauthorized'}, status=401)
+        
+    role = user.profile.role.name if user.profile.role else None
+    if role != 'COMPANY_ADMIN':
+        return JsonResponse({'success': False, 'message': 'Only Owner/Company Admin can create extras'}, status=403)
+        
+    company = user.profile.company
+    if not company:
+        return JsonResponse({'success': False, 'message': 'No company associated with user'}, status=400)
+        
+    try:
+        from .models import Extra
+        from core.functions import get_auto_id
+        
+        data = json.loads(request.body)
+        name = data.get('name', '').strip()
+        
+        if not name:
+            return JsonResponse({'success': False, 'message': 'name is required'}, status=400)
+            
+        if Extra.objects.filter(company=company, name__iexact=name, is_deleted=False).exists():
+            return JsonResponse({'success': False, 'message': 'Extra item already exists'}, status=400)
+            
+        extra = Extra.objects.create(
+            company=company,
+            name=name,
+            auto_id=get_auto_id(Extra),
+            creator=user
+        )
+        return JsonResponse({
+            'success': True,
+            'message': 'Extra item created successfully',
+            'extra': {
+                'id': str(extra.id),
+                'name': extra.name,
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'message': str(e)}, status=500)

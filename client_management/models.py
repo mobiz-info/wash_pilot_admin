@@ -366,3 +366,13 @@ class PurchaseRequest(BaseModel):
 
     def __str__(self):
         return f"{self.material.item_name} - {self.qty} ({self.date})"
+
+
+class Extra(BaseModel):
+    company = models.ForeignKey(Client, on_delete=models.CASCADE, related_name='extras', null=True, blank=True)
+    name = models.CharField(max_length=200)
+
+    def __str__(self):
+        if self.company:
+            return f"{self.name} - {self.company.company_name}"
+        return self.name
